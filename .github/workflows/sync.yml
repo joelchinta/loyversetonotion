@@ -10,6 +10,8 @@ on:
         description: 'Starting receipt number (leave empty to continue from last)'
         required: false
         type: string
+  repository_dispatch:
+    types: [loyverse-sync]
 
 permissions:
   contents: write
