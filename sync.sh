@@ -7,9 +7,15 @@ set -euo pipefail
 LOYVERSE_API_KEY="${LOYVERSE_API_KEY:-}"
 NOTION_API_KEY="${NOTION_API_KEY:-}"
 NOTION_DB_ID="${NOTION_DB_ID:-}"
+START_RECEIPT_NUMBER="${START_RECEIPT_NUMBER:-}"
+
+echo "🔍 Debug Info:"
+echo "   LOYVERSE_API_KEY: ${LOYVERSE_API_KEY:0:10}..."
+echo "   NOTION_API_KEY: ${NOTION_API_KEY:0:15}..."
+echo "   NOTION_DB_ID: $NOTION_DB_ID"
 
 if [[ -z "$LOYVERSE_API_KEY" || -z "$NOTION_API_KEY" || -z "$NOTION_DB_ID" ]]; then
-  echo "Error: Required environment variables not set"
+  echo "❌ Error: Required environment variables not set"
   exit 1
 fi
 
@@ -21,23 +27,35 @@ LAST_RECEIPT_FILE=".last_receipt.txt"
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ -f "$LAST_RECEIPT_FILE" ]]; then
   RECEIPTNUMBER=$(cat "$LAST_RECEIPT_FILE")
-  echo "📋 Resuming from receipt: $RECEIPTNUMBER"
+  echo "📋 Resuming from saved receipt: $RECEIPTNUMBER"
+elif [[ -n "$START_RECEIPT_NUMBER" ]]; then
+  RECEIPTNUMBER="$START_RECEIPT_NUMBER"
+  echo "📋 Starting from configured receipt: $RECEIPTNUMBER"
+  # Save it so next run continues from here
+  echo "$RECEIPTNUMBER" > "$LAST_RECEIPT_FILE"
 else
   RECEIPTNUMBER="Value"
   echo "📋 Starting fresh (no previous receipt number)"
 fi
 
 echo "🔄 Fetching receipts from Loyverse..."
+echo "   URL: https://api.loyverse.com/v1.0/receipts?since_receipt_number=$RECEIPTNUMBER"
 
 RAW=$(curl -s -H "Authorization: Bearer $LOYVERSE_API_KEY" \
   "https://api.loyverse.com/v1.0/receipts?since_receipt_number=$RECEIPTNUMBER")
 
+# Debug: Show raw response
+echo "📥 Raw API Response (first 500 chars):"
+echo "$RAW" | head -c 500
+echo ""
+
 # Check if we got any receipts
-RECEIPT_COUNT=$(jq -r '.receipts | length' <<<"$RAW")
+RECEIPT_COUNT=$(jq -r '.receipts | length' <<<"$RAW" 2>/dev/null || echo "0")
 echo "📦 Found $RECEIPT_COUNT receipt(s) to process"
 
-if [[ "$RECEIPT_COUNT" == "0" ]]; then
+if [[ "$RECEIPT_COUNT" == "0" || "$RECEIPT_COUNT" == "null" ]]; then
   echo "✅ No new receipts. Exiting."
+  echo "💡 Tip: Check if 'since_receipt_number=$RECEIPTNUMBER' is correct"
   exit 0
 fi
 
@@ -80,6 +98,22 @@ clear_page_children() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TEST NOTION CONNECTION
+# ─────────────────────────────────────────────────────────────────────────────
+echo "🔗 Testing Notion connection..."
+NOTION_TEST=$(curl -s -X GET "https://api.notion.com/v1/databases/$NOTION_DB_ID" \
+  -H "Authorization: Bearer $NOTION_API_KEY" \
+  -H "Notion-Version: 2022-06-28")
+
+NOTION_ERROR=$(echo "$NOTION_TEST" | jq -r '.code // empty')
+if [[ -n "$NOTION_ERROR" ]]; then
+  echo "❌ Notion Error: $NOTION_ERROR"
+  echo "$NOTION_TEST" | jq .
+  exit 1
+fi
+echo "✅ Notion connection successful"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LOAD OR BUILD ITEM→CATEGORY CACHE
 # ─────────────────────────────────────────────────────────────────────────────
 echo "🗂️  Loading item/category cache..."
@@ -92,7 +126,7 @@ else
 fi
 
 # Get unique item IDs from receipts
-UNIQUE_ITEMS=$(jq -r '.receipts[].line_items[].item_id' <<<"$RAW" | sort -u)
+UNIQUE_ITEMS=$(jq -r '.receipts[].line_items[].item_id' <<<"$RAW" 2>/dev/null | sort -u)
 NEW_ITEMS=0
 
 for item_id in $UNIQUE_ITEMS; do
@@ -139,6 +173,9 @@ EXISTING_PAGES=$(curl -s -X POST \
   -H "Content-Type:application/json" \
   --data '{"page_size": 100}')
 
+echo "📄 Existing pages response:"
+echo "$EXISTING_PAGES" | jq '.' | head -n 20
+
 EXISTING_MAP=$(jq -c '[.results[] | {
   id: .id,
   receipt_number: (.properties.receipt_number.title[0].text.content // ""),
@@ -159,6 +196,11 @@ echo "🔨 Processing receipts..."
 echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
   RN=$(jq -r '.receipt_number // empty' <<<"$rec")
   [[ -z "$RN" ]] && continue
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "Processing Receipt: $RN"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   
   # Extract all fields in one jq call for efficiency
   read -r CA RD UA CA2 RT OR NT SRC SID EID PID CID PS TM TAX DISC TP SRG PE PD PB < <(
@@ -187,6 +229,9 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     ] | @tsv' <<<"$rec"
   )
   
+  echo "   Created: $CA"
+  echo "   Total: $TM"
+  
   # Additional fields that need special processing
   PMDATA=""
   INOTE=$(jq -r '[.line_items[]?.line_note] | map(select(.!=null)) | join("; ")' <<<"$rec")
@@ -212,6 +257,10 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     PAGE_ID=$(jq -r '.id' <<<"$EXISTING")
     EXISTING_UA=$(jq -r '.updated_at' <<<"$EXISTING")
     
+    echo "   ℹ️  Page exists: $PAGE_ID"
+    echo "   Existing updated_at: $EXISTING_UA"
+    echo "   New updated_at: $UA"
+    
     # Skip if not updated
     if [[ "$UA" == "$EXISTING_UA" ]]; then
       echo "  ⏭️  Skipping unchanged receipt: $RN"
@@ -222,7 +271,7 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     echo "  🔄 Updating receipt: $RN"
   else
     PAGE_ID=""
-    echo "  ✨ Creating receipt: $RN"
+    echo "  ✨ Creating new receipt: $RN"
   fi
   
   # ───────────────────────────────────────────────────────────────────────────
@@ -276,6 +325,10 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
        }
      }')
   
+  echo "   📝 Properties JSON (first 300 chars):"
+  echo "$PROPS" | head -c 300
+  echo ""
+  
   # ───────────────────────────────────────────────────────────────────────────
   # BUILD CHILD TABLE
   # ───────────────────────────────────────────────────────────────────────────
@@ -312,30 +365,64 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
   # SEND TO NOTION
   # ───────────────────────────────────────────────────────────────────────────
   if [[ -n "$PAGE_ID" ]]; then
+    echo "   🔄 Updating existing page..."
     # Update existing page
-    curl -s -X PATCH "https://api.notion.com/v1/pages/$PAGE_ID" \
+    UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH "https://api.notion.com/v1/pages/$PAGE_ID" \
       -H "Authorization: Bearer $NOTION_API_KEY" \
       -H "Notion-Version: 2022-06-28" \
       -H "Content-Type: application/json" \
-      --data "$PROPS" >/dev/null
+      --data "$PROPS")
+    
+    HTTP_CODE=$(echo "$UPDATE_RESPONSE" | tail -n1)
+    RESPONSE_BODY=$(echo "$UPDATE_RESPONSE" | sed '$d')
+    
+    echo "   HTTP Status: $HTTP_CODE"
+    if [[ "$HTTP_CODE" != "200" ]]; then
+      echo "   ❌ Update failed:"
+      echo "$RESPONSE_BODY" | jq .
+      continue
+    fi
+    echo "   ✅ Properties updated"
     
     clear_page_children "$PAGE_ID"
     
-    curl -s -X PATCH "https://api.notion.com/v1/blocks/$PAGE_ID/children" \
+    CHILDREN_RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH "https://api.notion.com/v1/blocks/$PAGE_ID/children" \
       -H "Authorization: Bearer $NOTION_API_KEY" \
       -H "Notion-Version: 2022-06-28" \
       -H "Content-Type: application/json" \
-      --data "{ \"children\": $CHILDREN }" >/dev/null
+      --data "{ \"children\": $CHILDREN }")
+    
+    HTTP_CODE=$(echo "$CHILDREN_RESPONSE" | tail -n1)
+    echo "   HTTP Status (children): $HTTP_CODE"
+    if [[ "$HTTP_CODE" != "200" ]]; then
+      echo "   ❌ Children update failed:"
+      echo "$CHILDREN_RESPONSE" | sed '$d' | jq .
+    else
+      echo "   ✅ Content updated"
+    fi
     
     ((UPDATED++))
   else
+    echo "   ✨ Creating new page..."
     # Create new page
     FULL=$(jq -n --argjson p "$PROPS" --argjson c "$CHILDREN" '$p + { children: $c }')
-    curl -s -X POST "https://api.notion.com/v1/pages" \
+    
+    CREATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.notion.com/v1/pages" \
       -H "Authorization: Bearer $NOTION_API_KEY" \
       -H "Notion-Version: 2022-06-28" \
       -H "Content-Type: application/json" \
-      --data "$FULL" >/dev/null
+      --data "$FULL")
+    
+    HTTP_CODE=$(echo "$CREATE_RESPONSE" | tail -n1)
+    RESPONSE_BODY=$(echo "$CREATE_RESPONSE" | sed '$d')
+    
+    echo "   HTTP Status: $HTTP_CODE"
+    if [[ "$HTTP_CODE" != "200" ]]; then
+      echo "   ❌ Creation failed:"
+      echo "$RESPONSE_BODY" | jq .
+      continue
+    fi
+    echo "   ✅ Page created"
     
     ((CREATED++))
   fi
@@ -355,7 +442,10 @@ fi
 # SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✅ Sync complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "   📝 Created: $CREATED"
 echo "   🔄 Updated: $UPDATED"
 echo "   ⏭️  Skipped: $SKIPPED"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
