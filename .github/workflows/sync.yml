@@ -3,7 +3,7 @@ name: Loyverse to Notion Sync
 on:
   schedule:
     # Runs every hour from 7am-12am BNT (23:00 UTC - 15:00 UTC)
-    - cron: '0 23,0-15 * * *'
+    # - cron: '0 23,0-15 * * *'
   workflow_dispatch:
     inputs:
       start_receipt:
