@@ -17,17 +17,6 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
       
-      - name: Restore cache
-        id: cache-restore
-        uses: actions/cache/restore@v3
-        with:
-          path: |
-            .loyverse_cache.json
-            .last_receipt.txt
-          key: loyverse-cache-${{ github.sha }}
-          restore-keys: |
-            loyverse-cache-
-      
       - name: Run sync script
         env:
           LOYVERSE_API_KEY: ${{ secrets.LOYVERSE_API_KEY }}
@@ -37,11 +26,10 @@ jobs:
           chmod +x sync.sh
           ./sync.sh
       
-      - name: Save cache
-        if: always()
-        uses: actions/cache/save@v3
-        with:
-          path: |
-            .loyverse_cache.json
-            .last_receipt.txt
-          key: loyverse-cache-${{ github.sha }}
+      - name: Commit and push cache files
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add .loyverse_cache.json .last_receipt.txt
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update sync cache [skip ci]"
+          git push
