@@ -17,13 +17,14 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
       
-      - name: Download cache
-        uses: actions/cache@v3
+      - name: Restore cache
+        id: cache-restore
+        uses: actions/cache/restore@v3
         with:
           path: |
             .loyverse_cache.json
             .last_receipt.txt
-          key: loyverse-cache-${{ github.run_id }}
+          key: loyverse-cache-${{ github.sha }}
           restore-keys: |
             loyverse-cache-
       
@@ -37,10 +38,10 @@ jobs:
           ./sync.sh
       
       - name: Save cache
-        uses: actions/cache/save@v3
         if: always()
+        uses: actions/cache/save@v3
         with:
           path: |
             .loyverse_cache.json
             .last_receipt.txt
-          key: loyverse-cache-${{ github.run_id }}
+          key: loyverse-cache-${{ github.sha }}
