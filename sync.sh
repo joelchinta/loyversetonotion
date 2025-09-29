@@ -31,7 +31,6 @@ if [[ -f "$LAST_RECEIPT_FILE" ]]; then
 elif [[ -n "$START_RECEIPT_NUMBER" ]]; then
   RECEIPTNUMBER="$START_RECEIPT_NUMBER"
   echo "📋 Starting from configured receipt: $RECEIPTNUMBER"
-  # Save it so next run continues from here
   echo "$RECEIPTNUMBER" > "$LAST_RECEIPT_FILE"
 else
   RECEIPTNUMBER="Value"
@@ -44,18 +43,15 @@ echo "   URL: https://api.loyverse.com/v1.0/receipts?since_receipt_number=$RECEI
 RAW=$(curl -s -H "Authorization: Bearer $LOYVERSE_API_KEY" \
   "https://api.loyverse.com/v1.0/receipts?since_receipt_number=$RECEIPTNUMBER")
 
-# Debug: Show raw response
 echo "📥 Raw API Response (first 500 chars):"
 echo "$RAW" | head -c 500
 echo ""
 
-# Check if we got any receipts
 RECEIPT_COUNT=$(jq -r '.receipts | length' <<<"$RAW" 2>/dev/null || echo "0")
 echo "📦 Found $RECEIPT_COUNT receipt(s) to process"
 
 if [[ "$RECEIPT_COUNT" == "0" || "$RECEIPT_COUNT" == "null" ]]; then
   echo "✅ No new receipts. Exiting."
-  echo "💡 Tip: Check if 'since_receipt_number=$RECEIPTNUMBER' is correct"
   exit 0
 fi
 
@@ -126,10 +122,12 @@ else
 fi
 
 # Get unique item IDs from receipts
-UNIQUE_ITEMS=$(jq -r '.receipts[].line_items[].item_id' <<<"$RAW" 2>/dev/null | sort -u)
+UNIQUE_ITEMS=$(jq -r '.receipts[].line_items[].item_id' <<<"$RAW" 2>/dev/null | sort -u || true)
 NEW_ITEMS=0
 
 for item_id in $UNIQUE_ITEMS; do
+  [[ -z "$item_id" ]] && continue
+  
   # Check if already cached
   cached=$(jq -r --arg id "$item_id" '.[$id] // empty' <<<"$CM")
   if [[ -n "$cached" ]]; then
@@ -139,18 +137,25 @@ for item_id in $UNIQUE_ITEMS; do
   echo "  → Fetching item: $item_id"
   ((NEW_ITEMS++))
   
+  # Fetch with error handling
   item_json=$(curl -s \
     -H "Authorization: Bearer $LOYVERSE_API_KEY" \
-    "https://api.loyverse.com/v1.0/items/$item_id")
+    "https://api.loyverse.com/v1.0/items/$item_id" || echo '{}')
   
-  cat_id=$(jq -r '.category_id // ""' <<<"$item_json")
-  cat_name=""
-  
-  if [[ -n "$cat_id" ]]; then
-    cat_name=$(curl -s \
-      -H "Authorization: Bearer $LOYVERSE_API_KEY" \
-      "https://api.loyverse.com/v1.0/categories/$cat_id" \
-      | jq -r '.name // ""')
+  # Check if the API call failed
+  if [[ $(echo "$item_json" | jq -r '.error // empty') != "" ]]; then
+    echo "    ⚠️  Failed to fetch item $item_id, using empty category"
+    cat_name=""
+  else
+    cat_id=$(jq -r '.category_id // ""' <<<"$item_json")
+    cat_name=""
+    
+    if [[ -n "$cat_id" && "$cat_id" != "null" ]]; then
+      cat_json=$(curl -s \
+        -H "Authorization: Bearer $LOYVERSE_API_KEY" \
+        "https://api.loyverse.com/v1.0/categories/$cat_id" || echo '{}')
+      cat_name=$(echo "$cat_json" | jq -r '.name // ""')
+    fi
   fi
   
   CM=$(jq -c --argjson cm "$CM" --arg id "$item_id" --arg cat "$cat_name" \
@@ -158,8 +163,6 @@ for item_id in $UNIQUE_ITEMS; do
 done
 
 echo "✓ Fetched $NEW_ITEMS new item(s)"
-
-# Save updated cache
 echo "$CM" > "$CACHE_FILE"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,9 +175,6 @@ EXISTING_PAGES=$(curl -s -X POST \
   -H "Notion-Version:2022-06-28" \
   -H "Content-Type:application/json" \
   --data '{"page_size": 100}')
-
-echo "📄 Existing pages response:"
-echo "$EXISTING_PAGES" | jq '.' | head -n 20
 
 EXISTING_MAP=$(jq -c '[.results[] | {
   id: .id,
@@ -202,37 +202,31 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
   echo "Processing Receipt: $RN"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   
-  # Extract all fields in one jq call for efficiency
-  read -r CA RD UA CA2 RT OR NT SRC SID EID PID CID PS TM TAX DISC TP SRG PE PD PB < <(
-    jq -r '[
-      .created_at,
-      .receipt_date,
-      .updated_at,
-      (.cancelled_at // ""),
-      .receipt_type,
-      (.order // ""),
-      (.note // ""),
-      .source,
-      .store_id,
-      .employee_id,
-      .pos_device_id,
-      (.customer_id // ""),
-      ([.payments[]?.name] | join(", ")),
-      .total_money,
-      .total_tax,
-      .total_discount,
-      .tip,
-      .surcharge,
-      .points_earned,
-      .points_deducted,
-      .points_balance
-    ] | @tsv' <<<"$rec"
-  )
+  # Extract all fields
+  CA=$(jq -r '.created_at' <<<"$rec")
+  RD=$(jq -r '.receipt_date' <<<"$rec")
+  UA=$(jq -r '.updated_at' <<<"$rec")
+  CA2=$(jq -r '.cancelled_at // ""' <<<"$rec")
+  RT=$(jq -r '.receipt_type' <<<"$rec")
+  OR=$(jq -r '.order // ""' <<<"$rec")
+  NT=$(jq -r '.note // ""' <<<"$rec")
+  SRC=$(jq -r '.source' <<<"$rec")
+  SID=$(jq -r '.store_id' <<<"$rec")
+  EID=$(jq -r '.employee_id' <<<"$rec")
+  PID=$(jq -r '.pos_device_id' <<<"$rec")
+  CID=$(jq -r '.customer_id // ""' <<<"$rec")
+  PS=$(jq -r '[.payments[]?.name] | join(", ")' <<<"$rec")
+  TM=$(jq -r '.total_money' <<<"$rec")
+  TAX=$(jq -r '.total_tax' <<<"$rec")
+  DISC=$(jq -r '.total_discount' <<<"$rec")
+  TP=$(jq -r '.tip' <<<"$rec")
+  SRG=$(jq -r '.surcharge' <<<"$rec")
+  PE=$(jq -r '.points_earned' <<<"$rec")
+  PD=$(jq -r '.points_deducted' <<<"$rec")
+  PB=$(jq -r '.points_balance' <<<"$rec")
   
-  echo "   Created: $CA"
   echo "   Total: $TM"
   
-  # Additional fields that need special processing
   PMDATA=""
   INOTE=$(jq -r '[.line_items[]?.line_note] | map(select(.!=null)) | join("; ")' <<<"$rec")
   IMOD_LIST=$(jq -r '[.line_items[]?.line_modifiers[]? | "\(.name): \(.option)"] | join("; ")' <<<"$rec")
@@ -240,28 +234,20 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
   IDISC=$(jq -r '[.line_items[]?.line_discounts | length] | add // 0' <<<"$rec")
   LSUM=$(jq -r '[.line_items[]?.item_name] | join(", ")' <<<"$rec")
   
-  # Multi-select fields
   DINE=$(jq -c '[.dining_option? | select(.!="" and .!=null) | {name:.}]' <<<"$rec")
   LI=$(jq -c '[.line_items[]? | {name:(.item_name + (if .variant_name then " ("+.variant_name+")" else "" end))}]' <<<"$rec")
   PM=$(jq -c '[.payments[]? | {name:.name}]' <<<"$rec")
   
-  # Categories for parent multi_select
   CATS=$(jq -c --argjson cm "$CM" '
     [ .line_items[]? | ($cm[.item_id] // "") ] | unique | map(select(.!="")) | map({name:.})
   ' <<<"$rec")
   
-  # Check if page exists and if it needs updating
   EXISTING=$(jq -r --arg rn "$RN" '.[$rn] // empty' <<<"$EXISTING_MAP")
   
   if [[ -n "$EXISTING" ]]; then
     PAGE_ID=$(jq -r '.id' <<<"$EXISTING")
     EXISTING_UA=$(jq -r '.updated_at' <<<"$EXISTING")
     
-    echo "   ℹ️  Page exists: $PAGE_ID"
-    echo "   Existing updated_at: $EXISTING_UA"
-    echo "   New updated_at: $UA"
-    
-    # Skip if not updated
     if [[ "$UA" == "$EXISTING_UA" ]]; then
       echo "  ⏭️  Skipping unchanged receipt: $RN"
       ((SKIPPED++))
@@ -274,9 +260,7 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     echo "  ✨ Creating new receipt: $RN"
   fi
   
-  # ───────────────────────────────────────────────────────────────────────────
-  # BUILD PARENT PROPS
-  # ───────────────────────────────────────────────────────────────────────────
+  # BUILD PROPS
   PROPS=$(jq -n \
     --arg rn "$RN" --arg ca "$CA" --arg rd "$RD" --arg ua "$UA" --arg ca2 "$CA2" \
     --arg rt "$RT" --arg ordr "$OR" --arg nt "$NT" --arg src "$SRC" \
@@ -325,15 +309,8 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
        }
      }')
   
-  echo "   📝 Properties JSON (first 300 chars):"
-  echo "$PROPS" | head -c 300
-  echo ""
-  
-  # ───────────────────────────────────────────────────────────────────────────
   # BUILD CHILD TABLE
-  # ───────────────────────────────────────────────────────────────────────────
   ROWS=$(jq -c --argjson cm "$CM" '
-    # header row
     [ { object:"block", type:"table_row", table_row:{ cells:[
         [{type:"text", text:{content:"Item"}}],
         [{type:"text", text:{content:"Variant"}}],
@@ -343,7 +320,6 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
         [{type:"text", text:{content:"Modifiers"}}],
         [{type:"text", text:{content:"Category"}}]
     ]}} ] +
-    # data rows
     [ .line_items[]? | {
         object:"block", type:"table_row", table_row:{ cells:[
           [{type:"text", text:{content:.item_name}}],
@@ -361,76 +337,41 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     [ { object:"block", type:"table", table:{ table_width:7, has_column_header:true, has_row_header:false, children: $rows }} ]
   ')
   
-  # ───────────────────────────────────────────────────────────────────────────
   # SEND TO NOTION
-  # ───────────────────────────────────────────────────────────────────────────
   if [[ -n "$PAGE_ID" ]]; then
-    echo "   🔄 Updating existing page..."
-    # Update existing page
-    UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH "https://api.notion.com/v1/pages/$PAGE_ID" \
+    echo "   🔄 Updating properties..."
+    curl -s -X PATCH "https://api.notion.com/v1/pages/$PAGE_ID" \
       -H "Authorization: Bearer $NOTION_API_KEY" \
       -H "Notion-Version: 2022-06-28" \
       -H "Content-Type: application/json" \
-      --data "$PROPS")
-    
-    HTTP_CODE=$(echo "$UPDATE_RESPONSE" | tail -n1)
-    RESPONSE_BODY=$(echo "$UPDATE_RESPONSE" | sed '$d')
-    
-    echo "   HTTP Status: $HTTP_CODE"
-    if [[ "$HTTP_CODE" != "200" ]]; then
-      echo "   ❌ Update failed:"
-      echo "$RESPONSE_BODY" | jq .
-      continue
-    fi
-    echo "   ✅ Properties updated"
+      --data "$PROPS" >/dev/null
     
     clear_page_children "$PAGE_ID"
     
-    CHILDREN_RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH "https://api.notion.com/v1/blocks/$PAGE_ID/children" \
+    echo "   🔄 Updating content..."
+    curl -s -X PATCH "https://api.notion.com/v1/blocks/$PAGE_ID/children" \
       -H "Authorization: Bearer $NOTION_API_KEY" \
       -H "Notion-Version: 2022-06-28" \
       -H "Content-Type: application/json" \
-      --data "{ \"children\": $CHILDREN }")
+      --data "{ \"children\": $CHILDREN }" >/dev/null
     
-    HTTP_CODE=$(echo "$CHILDREN_RESPONSE" | tail -n1)
-    echo "   HTTP Status (children): $HTTP_CODE"
-    if [[ "$HTTP_CODE" != "200" ]]; then
-      echo "   ❌ Children update failed:"
-      echo "$CHILDREN_RESPONSE" | sed '$d' | jq .
-    else
-      echo "   ✅ Content updated"
-    fi
-    
+    echo "   ✅ Updated"
     ((UPDATED++))
   else
-    echo "   ✨ Creating new page..."
-    # Create new page
+    echo "   ✨ Creating page..."
     FULL=$(jq -n --argjson p "$PROPS" --argjson c "$CHILDREN" '$p + { children: $c }')
-    
-    CREATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.notion.com/v1/pages" \
+    curl -s -X POST "https://api.notion.com/v1/pages" \
       -H "Authorization: Bearer $NOTION_API_KEY" \
       -H "Notion-Version: 2022-06-28" \
       -H "Content-Type: application/json" \
-      --data "$FULL")
+      --data "$FULL" >/dev/null
     
-    HTTP_CODE=$(echo "$CREATE_RESPONSE" | tail -n1)
-    RESPONSE_BODY=$(echo "$CREATE_RESPONSE" | sed '$d')
-    
-    echo "   HTTP Status: $HTTP_CODE"
-    if [[ "$HTTP_CODE" != "200" ]]; then
-      echo "   ❌ Creation failed:"
-      echo "$RESPONSE_BODY" | jq .
-      continue
-    fi
-    echo "   ✅ Page created"
-    
+    echo "   ✅ Created"
     ((CREATED++))
   fi
 done
 
-# ─────────────────────────────────────────────────────────────────────────────
 # SAVE LATEST RECEIPT NUMBER
-# ─────────────────────────────────────────────────────────────────────────────
 LATEST_NUMBER=$(jq -r '(.receipts // []) | max_by(.created_at)? .receipt_number // empty' <<<"$RAW")
 
 if [[ -n "$LATEST_NUMBER" ]]; then
@@ -438,9 +379,6 @@ if [[ -n "$LATEST_NUMBER" ]]; then
   echo "💾 Saved latest receipt number: $LATEST_NUMBER"
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SUMMARY
-# ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✅ Sync complete!"
@@ -448,4 +386,3 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "   📝 Created: $CREATED"
 echo "   🔄 Updated: $UPDATED"
 echo "   ⏭️  Skipped: $SKIPPED"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
