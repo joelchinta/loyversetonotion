@@ -28,7 +28,7 @@ RAW=$(curl -s -H "Authorization: Bearer $LOYVERSE_API_KEY" \
 RECEIPT_COUNT=$(jq -r '.receipts | length' <<<"$RAW" 2>/dev/null || echo "0")
 
 if [[ "$RECEIPT_COUNT" == "0" || "$RECEIPT_COUNT" == "null" ]]; then
-  echo "Receipt not found: $RECEIPT_NUMBER"
+  echo "Receipt not found"
   exit 1
 fi
 
