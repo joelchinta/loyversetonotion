@@ -3,12 +3,6 @@ name: Loyverse to Notion Sync
 on:
   repository_dispatch:
     types: [loyverse-sync]
-  workflow_dispatch:
-    inputs:
-      start_receipt:
-        description: 'Starting receipt number (leave empty to continue from last)'
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -34,23 +28,7 @@ jobs:
           curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
             https://api.github.com/gists/${{ secrets.GIST_ID }} | \
             jq -r '.files."last_receipt.txt".content // "Value"' > .last_receipt.txt
-
-      - name: Set starting receipt if provided
-        env:
-          START_RECEIPT_WF: ${{ github.event.inputs.start_receipt }}
-          START_RECEIPT_RD: ${{ github.event.client_payload.start_receipt }}
-        run: |
-          START_RECEIPT="${START_RECEIPT_WF:-}"
-          if [ -z "$START_RECEIPT" ]; then
-            START_RECEIPT="${START_RECEIPT_RD:-}"
-          fi
-
-          if [ -n "$START_RECEIPT" ]; then
-            echo "$START_RECEIPT" > .last_receipt.txt
-            echo "Starting from receipt: $START_RECEIPT"
-          else
-            echo "No starting receipt provided. Using cached .last_receipt.txt"
-          fi
+          echo "Using starting receipt: $(cat .last_receipt.txt)"
 
       - name: Run sync script
         env:
@@ -66,7 +44,6 @@ jobs:
         run: |
           CACHE_CONTENT=$(cat .loyverse_cache.json | jq -Rs .)
           RECEIPT_CONTENT=$(cat .last_receipt.txt | jq -Rs .)
-
           curl -s -X PATCH \
             -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
             -H "Content-Type: application/json" \
