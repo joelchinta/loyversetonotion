@@ -19,7 +19,7 @@ fi
 CACHE_FILE=".loyverse_cache.json"
 LAST_RECEIPT_FILE=".last_receipt.txt"
 
-echo "Syncing specific receipt: $RECEIPT_NUMBER"
+echo "Syncing specific receipt from webhook"
 
 # Fetch specific receipt
 RAW=$(curl -s -H "Authorization: Bearer $LOYVERSE_API_KEY" \
@@ -273,4 +273,4 @@ fi
 # Update last receipt file
 echo "$RECEIPT_NUMBER" > "$LAST_RECEIPT_FILE"
 
-echo "Webhook sync complete for receipt: $RECEIPT_NUMBER"
+echo "Webhook sync complete"
