@@ -1,12 +1,14 @@
-# Secrets (just in case)
-*.key
-*.secret
-.env
+# Cache files (now stored in Gist)
+   .loyverse_cache.json
+   .last_receipt.txt
 
-# macOS
-.DS_Store
+   # Secrets
+   *.key
+   *.secret
+   .env
 
-# Logs
-*.log
+   # macOS
+   .DS_Store
 
-# Note: .loyverse_cache.json and .last_receipt.txt are now tracked
+   # Logs
+   *.log
