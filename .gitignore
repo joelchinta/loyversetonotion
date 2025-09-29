@@ -1,0 +1,14 @@
+# Cache files
+.loyverse_cache.json
+.last_receipt.txt
+
+# Secrets (just in case)
+*.key
+*.secret
+.env
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
