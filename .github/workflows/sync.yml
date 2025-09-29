@@ -1,0 +1,46 @@
+name: Loyverse to Notion Sync
+
+on:
+  schedule:
+    # Run every hour at minute 0
+    - cron: '0 * * * *'
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+      
+      - name: Download cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            .loyverse_cache.json
+            .last_receipt.txt
+          key: loyverse-cache-${{ github.run_id }}
+          restore-keys: |
+            loyverse-cache-
+      
+      - name: Run sync script
+        env:
+          LOYVERSE_API_KEY: ${{ secrets.LOYVERSE_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+        run: |
+          chmod +x sync.sh
+          ./sync.sh
+      
+      - name: Save cache
+        uses: actions/cache/save@v3
+        if: always()
+        with:
+          path: |
+            .loyverse_cache.json
+            .last_receipt.txt
+          key: loyverse-cache-${{ github.run_id }}
