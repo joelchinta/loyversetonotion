@@ -1,0 +1,52 @@
+name: Webhook-Triggered Sync
+
+on:
+  repository_dispatch:
+    types: [loyverse-webhook]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+      
+      - name: Download cache from Gist
+        continue-on-error: true
+        run: |
+          curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} | \
+            jq -r '.files."loyverse_cache.json".content // "{}"' > .loyverse_cache.json
+          
+          curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} | \
+            jq -r '.files."last_receipt.txt".content // "Value"' > .last_receipt.txt
+      
+      - name: Run webhook sync script
+        env:
+          LOYVERSE_API_KEY: ${{ secrets.LOYVERSE_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          RECEIPT_NUMBER: ${{ github.event.client_payload.receipt_number }}
+        run: |
+          chmod +x webhook-sync.sh
+          ./webhook-sync.sh
+      
+      - name: Upload cache to Gist
+        if: always()
+        run: |
+          CACHE_CONTENT=$(cat .loyverse_cache.json | jq -Rs .)
+          RECEIPT_CONTENT=$(cat .last_receipt.txt | jq -Rs .)
+          
+          curl -s -X PATCH \
+            -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} \
+            -d "{\"files\":{\"loyverse_cache.json\":{\"content\":$CACHE_CONTENT},\"last_receipt.txt\":{\"content\":$RECEIPT_CONTENT}}}" > /dev/null
