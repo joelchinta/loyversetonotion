@@ -326,7 +326,7 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
   fi
 done
 
-LATEST_NUMBER=$(jq -r '(.receipts // []) | max_by(.created_at)? .receipt_number // empty' <<<"$RAW")
+LATEST_NUMBER=$(jq -r '(.receipts // []) | max_by(.created_at)? | .receipt_number // empty' <<<"$RAW")
 
 if [[ -n "$LATEST_NUMBER" ]]; then
   echo "$LATEST_NUMBER" > "$LAST_RECEIPT_FILE"
