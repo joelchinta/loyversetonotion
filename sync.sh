@@ -6,13 +6,8 @@ NOTION_API_KEY="${NOTION_API_KEY:-}"
 NOTION_DB_ID="${NOTION_DB_ID:-}"
 START_RECEIPT_NUMBER="${START_RECEIPT_NUMBER:-}"
 
-echo "🔍 Debug Info:"
-echo "   LOYVERSE_API_KEY: ${LOYVERSE_API_KEY:0:10}..."
-echo "   NOTION_API_KEY: ${NOTION_API_KEY:0:15}..."
-echo "   NOTION_DB_ID: $NOTION_DB_ID"
-
 if [[ -z "$LOYVERSE_API_KEY" || -z "$NOTION_API_KEY" || -z "$NOTION_DB_ID" ]]; then
-  echo "❌ Error: Required environment variables not set"
+  echo "Error: Required environment variables not set"
   exit 1
 fi
 
@@ -21,28 +16,26 @@ LAST_RECEIPT_FILE=".last_receipt.txt"
 
 if [[ -f "$LAST_RECEIPT_FILE" ]]; then
   RECEIPTNUMBER=$(cat "$LAST_RECEIPT_FILE")
-  echo "📋 Resuming from saved receipt: $RECEIPTNUMBER"
 elif [[ -n "$START_RECEIPT_NUMBER" ]]; then
   RECEIPTNUMBER="$START_RECEIPT_NUMBER"
-  echo "📋 Starting from configured receipt: $RECEIPTNUMBER"
   echo "$RECEIPTNUMBER" > "$LAST_RECEIPT_FILE"
 else
   RECEIPTNUMBER="Value"
-  echo "📋 Starting fresh"
 fi
 
-echo "🔄 Fetching receipts from Loyverse..."
+echo "Starting sync..."
 
 RAW=$(curl -s -H "Authorization: Bearer $LOYVERSE_API_KEY" \
   "https://api.loyverse.com/v1.0/receipts?since_receipt_number=$RECEIPTNUMBER")
 
 RECEIPT_COUNT=$(jq -r '.receipts | length' <<<"$RAW" 2>/dev/null || echo "0")
-echo "📦 Found $RECEIPT_COUNT receipt(s) to process"
 
 if [[ "$RECEIPT_COUNT" == "0" || "$RECEIPT_COUNT" == "null" ]]; then
-  echo "✅ No new receipts."
+  echo "No new receipts"
   exit 0
 fi
+
+echo "Processing $RECEIPT_COUNT receipt(s)..."
 
 notion_list_children() {
   local pid="$1"
@@ -79,37 +72,29 @@ clear_page_children() {
   done < <(notion_list_children "$pid")
 }
 
-echo "🗂️  Loading item/category cache..."
 if [[ -f "$CACHE_FILE" ]]; then
   CM=$(cat "$CACHE_FILE")
-  echo "✓ Loaded cache with $(jq 'length' <<<"$CM") items"
 else
   CM='{}'
-  echo "✓ Starting with empty cache"
 fi
 
-# Get unique item IDs - wrapped in set +e to prevent exit on error
 set +e
 UNIQUE_ITEMS=$(jq -r '.receipts[].line_items[].item_id' <<<"$RAW" 2>/dev/null | sort -u)
 set -e
 
 NEW_ITEMS=0
 
-# Process items one by one
 if [[ -n "$UNIQUE_ITEMS" ]]; then
   while IFS= read -r item_id; do
     [[ -z "$item_id" ]] && continue
     
-    # Check cache
     cached=$(jq -r --arg id "$item_id" '.[$id] // empty' <<<"$CM" 2>/dev/null || echo "")
     if [[ -n "$cached" ]]; then
       continue
     fi
     
-    echo "  → Fetching item: $item_id"
     ((NEW_ITEMS++)) || true
     
-    # Fetch item
     set +e
     item_json=$(curl -s \
       -H "Authorization: Bearer $LOYVERSE_API_KEY" \
@@ -138,10 +123,8 @@ if [[ -n "$UNIQUE_ITEMS" ]]; then
   done <<< "$UNIQUE_ITEMS"
 fi
 
-echo "✓ Fetched $NEW_ITEMS new item(s)"
 echo "$CM" > "$CACHE_FILE"
 
-echo "📊 Fetching existing Notion pages..."
 EXISTING_PAGES=$(curl -s -X POST \
   "https://api.notion.com/v1/databases/$NOTION_DB_ID/query" \
   -H "Authorization: Bearer $NOTION_API_KEY" \
@@ -155,19 +138,13 @@ EXISTING_MAP=$(echo "$EXISTING_PAGES" | jq -c '[.results[] | {
   updated_at: (.properties.updated_at.date.start // "")
 }] | map({key: .receipt_number, value: {id: .id, updated_at: .updated_at}}) | from_entries')
 
-echo "✓ Found $(echo "$EXISTING_MAP" | jq 'length') existing page(s)"
-
 CREATED=0
 UPDATED=0
 SKIPPED=0
 
-echo "🔨 Processing receipts..."
-
 echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
   RN=$(jq -r '.receipt_number // empty' <<<"$rec")
   [[ -z "$RN" ]] && continue
-  
-  echo "  Processing: $RN"
   
   CA=$(jq -r '.created_at' <<<"$rec")
   RD=$(jq -r '.receipt_date' <<<"$rec")
@@ -213,14 +190,11 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     EXISTING_UA=$(jq -r '.updated_at' <<<"$EXISTING")
     
     if [[ "$UA" == "$EXISTING_UA" ]]; then
-      echo "    ⏭️  Skipped"
       ((SKIPPED++)) || true
       continue
     fi
-    echo "    🔄 Updating..."
   else
     PAGE_ID=""
-    echo "    ✨ Creating..."
   fi
   
   PROPS=$(jq -n \
@@ -330,11 +304,6 @@ LATEST_NUMBER=$(jq -r '(.receipts // []) | max_by(.created_at)? | .receipt_numbe
 
 if [[ -n "$LATEST_NUMBER" ]]; then
   echo "$LATEST_NUMBER" > "$LAST_RECEIPT_FILE"
-  echo "💾 Saved latest: $LATEST_NUMBER"
 fi
 
-echo ""
-echo "✅ Sync complete!"
-echo "   📝 Created: $CREATED"
-echo "   🔄 Updated: $UPDATED"
-echo "   ⏭️  Skipped: $SKIPPED"
+echo "Sync complete: Created $CREATED, Updated $UPDATED, Skipped $SKIPPED"
