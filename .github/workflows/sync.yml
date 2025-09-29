@@ -2,8 +2,17 @@ name: Loyverse to Notion Sync
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    # Runs at minutes 0 of hours 23,0-15 UTC (7am-12am BNT/UTC+8)
+    # BNT 7am = UTC 11pm (23:00) previous day
+    # BNT 12am = UTC 4pm (16:00) same day
+    - cron: '0 23 * * *'    # BNT 7am
+    - cron: '0 0-15 * * *'  # BNT 8am-12am
   workflow_dispatch:
+    inputs:
+      start_receipt:
+        description: 'Starting receipt number (leave empty to continue from last)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -22,12 +31,17 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
       
+      - name: Set starting receipt if provided
+        if: github.event.inputs.start_receipt != ''
+        run: |
+          echo "${{ github.event.inputs.start_receipt }}" > .last_receipt.txt
+          echo "Starting from receipt: ${{ github.event.inputs.start_receipt }}"
+      
       - name: Run sync script
         env:
           LOYVERSE_API_KEY: ${{ secrets.LOYVERSE_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
-          START_RECEIPT_NUMBER: ${{ secrets.START_RECEIPT_NUMBER }}
         run: |
           chmod +x sync.sh
           ./sync.sh
