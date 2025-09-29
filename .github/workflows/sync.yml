@@ -2,11 +2,8 @@ name: Loyverse to Notion Sync
 
 on:
   schedule:
-    # Runs at minutes 0 of hours 23,0-15 UTC (7am-12am BNT/UTC+8)
-    # BNT 7am = UTC 11pm (23:00) previous day
-    # BNT 12am = UTC 4pm (16:00) same day
-    - cron: '0 23 * * *'    # BNT 7am
-    - cron: '0 0-15 * * *'  # BNT 8am-12am
+    # Runs every hour from 7am-12am BNT (23:00 UTC - 15:00 UTC)
+    - cron: '0 23,0-15 * * *'
   workflow_dispatch:
     inputs:
       start_receipt:
@@ -24,12 +21,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
       
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
+      
+      - name: Download cache from Gist
+        continue-on-error: true
+        run: |
+          curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} | \
+            jq -r '.files."loyverse_cache.json".content // "{}"' > .loyverse_cache.json
+          
+          curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} | \
+            jq -r '.files."last_receipt.txt".content // "Value"' > .last_receipt.txt
       
       - name: Set starting receipt if provided
         if: github.event.inputs.start_receipt != ''
@@ -46,14 +51,14 @@ jobs:
           chmod +x sync.sh
           ./sync.sh
       
-      - name: Commit and push cache files
+      - name: Upload cache to Gist
+        if: always()
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add .loyverse_cache.json .last_receipt.txt 2>/dev/null || true
-          if ! git diff --quiet --cached; then
-            git commit -m "Update sync cache [skip ci]"
-            git push
-          else
-            echo "No changes to commit"
-          fi
+          CACHE_CONTENT=$(cat .loyverse_cache.json | jq -Rs .)
+          RECEIPT_CONTENT=$(cat .last_receipt.txt | jq -Rs .)
+          
+          curl -X PATCH \
+            -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/gists/${{ secrets.GIST_ID }} \
+            -d "{\"files\":{\"loyverse_cache.json\":{\"content\":$CACHE_CONTENT},\"last_receipt.txt\":{\"content\":$RECEIPT_CONTENT}}}"
