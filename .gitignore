@@ -1,7 +1,3 @@
-# Cache files
-.loyverse_cache.json
-.last_receipt.txt
-
 # Secrets (just in case)
 *.key
 *.secret
@@ -12,3 +8,5 @@
 
 # Logs
 *.log
+
+# Note: .loyverse_cache.json and .last_receipt.txt are now tracked
