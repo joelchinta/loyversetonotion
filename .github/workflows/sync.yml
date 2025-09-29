@@ -1,17 +1,14 @@
 name: Loyverse to Notion Sync
 
 on:
-  schedule:
-    # Runs every hour from 7am-12am BNT (23:00 UTC - 15:00 UTC)
-    - cron: '0 23,0-15 * * *'
+  repository_dispatch:
+    types: [loyverse-sync]
   workflow_dispatch:
     inputs:
       start_receipt:
         description: 'Starting receipt number (leave empty to continue from last)'
         required: false
         type: string
-  repository_dispatch:
-    types: [loyverse-sync]
 
 permissions:
   contents: write
@@ -19,31 +16,42 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-      
+        uses: actions/checkout@v4
+
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
-      
+
       - name: Download cache from Gist
         continue-on-error: true
         run: |
           curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
             https://api.github.com/gists/${{ secrets.GIST_ID }} | \
             jq -r '.files."loyverse_cache.json".content // "{}"' > .loyverse_cache.json
-          
+
           curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
             https://api.github.com/gists/${{ secrets.GIST_ID }} | \
             jq -r '.files."last_receipt.txt".content // "Value"' > .last_receipt.txt
-      
+
       - name: Set starting receipt if provided
-        if: github.event.inputs.start_receipt != ''
+        env:
+          START_RECEIPT_WF: ${{ github.event.inputs.start_receipt }}
+          START_RECEIPT_RD: ${{ github.event.client_payload.start_receipt }}
         run: |
-          echo "${{ github.event.inputs.start_receipt }}" > .last_receipt.txt
-          echo "Starting from receipt: ${{ github.event.inputs.start_receipt }}"
-      
+          START_RECEIPT="${START_RECEIPT_WF:-}"
+          if [ -z "$START_RECEIPT" ]; then
+            START_RECEIPT="${START_RECEIPT_RD:-}"
+          fi
+
+          if [ -n "$START_RECEIPT" ]; then
+            echo "$START_RECEIPT" > .last_receipt.txt
+            echo "Starting from receipt: $START_RECEIPT"
+          else
+            echo "No starting receipt provided. Using cached .last_receipt.txt"
+          fi
+
       - name: Run sync script
         env:
           LOYVERSE_API_KEY: ${{ secrets.LOYVERSE_API_KEY }}
@@ -52,13 +60,13 @@ jobs:
         run: |
           chmod +x sync.sh
           ./sync.sh
-      
+
       - name: Upload cache to Gist
         if: always()
         run: |
           CACHE_CONTENT=$(cat .loyverse_cache.json | jq -Rs .)
           RECEIPT_CONTENT=$(cat .last_receipt.txt | jq -Rs .)
-          
+
           curl -s -X PATCH \
             -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
             -H "Content-Type: application/json" \
