@@ -57,8 +57,18 @@ jobs:
           CACHE_CONTENT=$(cat .loyverse_cache.json | jq -Rs .)
           RECEIPT_CONTENT=$(cat .last_receipt.txt | jq -Rs .)
           
-          curl -X PATCH \
+          curl -s -X PATCH \
             -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
             -H "Content-Type: application/json" \
             https://api.github.com/gists/${{ secrets.GIST_ID }} \
-            -d "{\"files\":{\"loyverse_cache.json\":{\"content\":$CACHE_CONTENT},\"last_receipt.txt\":{\"content\":$RECEIPT_CONTENT}}}"
+            -d "{\"files\":{\"loyverse_cache.json\":{\"content\":$CACHE_CONTENT},\"last_receipt.txt\":{\"content\":$RECEIPT_CONTENT}}}" - name: Upload cache to Gist
+  if: always()
+  run: |
+    CACHE_CONTENT=$(cat .loyverse_cache.json | jq -Rs .)
+    RECEIPT_CONTENT=$(cat .last_receipt.txt | jq -Rs .)
+    
+    curl -s -X PATCH \
+      -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+      -H "Content-Type: application/json" \
+      https://api.github.com/gists/${{ secrets.GIST_ID }} \
+      -d "{\"files\":{\"loyverse_cache.json\":{\"content\":$CACHE_CONTENT},\"last_receipt.txt\":{\"content\":$RECEIPT_CONTENT}}}" > /dev/null
