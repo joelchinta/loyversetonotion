@@ -1,6 +1,7 @@
 name: Loyverse to Notion Sync
 
 on:
+  workflow_dispatch: 
   repository_dispatch:
     types: [loyverse-sync]
 
