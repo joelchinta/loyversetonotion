@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$SCRIPT_DIR/sync-common.sh"
+
 LOYVERSE_API_KEY="${LOYVERSE_API_KEY:-}"
 NOTION_API_KEY="${NOTION_API_KEY:-}"
 NOTION_DB_ID="${NOTION_DB_ID:-}"
@@ -18,59 +21,22 @@ if [[ -f "$LAST_RECEIPT_FILE" ]]; then
   RECEIPTNUMBER=$(cat "$LAST_RECEIPT_FILE")
 elif [[ -n "$START_RECEIPT_NUMBER" ]]; then
   RECEIPTNUMBER="$START_RECEIPT_NUMBER"
-  echo "$RECEIPTNUMBER" > "$LAST_RECEIPT_FILE"
+
 else
   RECEIPTNUMBER="Value"
 fi
 
 echo "Starting sync..."
 
-RAW=$(curl -s -H "Authorization: Bearer $LOYVERSE_API_KEY" \
-  "https://api.loyverse.com/v1.0/receipts?since_receipt_number=$RECEIPTNUMBER")
-
-RECEIPT_COUNT=$(jq -r '.receipts | length' <<<"$RAW" 2>/dev/null || echo "0")
-
-if [[ "$RECEIPT_COUNT" == "0" || "$RECEIPT_COUNT" == "null" ]]; then
+RAW=$(loyverse_receipts "$RECEIPTNUMBER")
+jq -e 'all(.receipts[]; (.receipt_number | type == "string" and length > 0) and (.created_at | type == "string"))' <<<"$RAW" >/dev/null
+RECEIPT_COUNT=$(jq -r '.receipts | length' <<<"$RAW")
+if [[ "$RECEIPT_COUNT" == 0 ]]; then
   echo "No new receipts"
   exit 0
 fi
 
 echo "Processing $RECEIPT_COUNT receipt(s)..."
-
-notion_list_children() {
-  local pid="$1"
-  local cursor=""
-  while :; do
-    local url="https://api.notion.com/v1/blocks/${pid}/children?page_size=100"
-    [[ -n "$cursor" ]] && url="${url}&start_cursor=${cursor}"
-    local resp
-    resp=$(curl -s -X GET "$url" \
-      -H "Authorization: Bearer $NOTION_API_KEY" \
-      -H "Notion-Version: 2022-06-28")
-    jq -r '.results[]?.id' <<<"$resp"
-    local has_more
-    has_more=$(jq -r '.has_more' <<<"$resp")
-    if [[ "$has_more" == "true" ]]; then
-      cursor=$(jq -r '.next_cursor' <<<"$resp")
-    else
-      break
-    fi
-  done
-}
-
-notion_delete_block() {
-  local bid="$1"
-  curl -s -X DELETE "https://api.notion.com/v1/blocks/${bid}" \
-    -H "Authorization: Bearer $NOTION_API_KEY" \
-    -H "Notion-Version: 2022-06-28" >/dev/null
-}
-
-clear_page_children() {
-  local pid="$1"
-  while read -r bid; do
-    [[ -n "$bid" ]] && notion_delete_block "$bid"
-  done < <(notion_list_children "$pid")
-}
 
 if [[ -f "$CACHE_FILE" ]]; then
   CM=$(cat "$CACHE_FILE")
@@ -96,7 +62,7 @@ if [[ -n "$UNIQUE_ITEMS" ]]; then
     ((NEW_ITEMS++)) || true
     
     set +e
-    item_json=$(curl -s \
+    item_json=$(api_json \
       -H "Authorization: Bearer $LOYVERSE_API_KEY" \
       "https://api.loyverse.com/v1.0/items/$item_id" 2>/dev/null)
     set -e
@@ -107,7 +73,7 @@ if [[ -n "$UNIQUE_ITEMS" ]]; then
       
       if [[ -n "$cat_id" && "$cat_id" != "null" ]]; then
         set +e
-        cat_json=$(curl -s \
+        cat_json=$(api_json \
           -H "Authorization: Bearer $LOYVERSE_API_KEY" \
           "https://api.loyverse.com/v1.0/categories/$cat_id" 2>/dev/null)
         set -e
@@ -125,24 +91,12 @@ fi
 
 echo "$CM" > "$CACHE_FILE"
 
-EXISTING_PAGES=$(curl -s -X POST \
-  "https://api.notion.com/v1/databases/$NOTION_DB_ID/query" \
-  -H "Authorization: Bearer $NOTION_API_KEY" \
-  -H "Notion-Version:2022-06-28" \
-  -H "Content-Type:application/json" \
-  --data '{"page_size": 100}')
-
-EXISTING_MAP=$(echo "$EXISTING_PAGES" | jq -c '[.results[] | {
-  id: .id,
-  receipt_number: (.properties.receipt_number.title[0].text.content // ""),
-  updated_at: (.properties.updated_at.date.start // "")
-}] | map({key: .receipt_number, value: {id: .id, updated_at: .updated_at}}) | from_entries')
-
 CREATED=0
 UPDATED=0
 SKIPPED=0
 
-echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
+RECEIPTS=$(jq -c '.receipts[]' <<<"$RAW")
+while IFS= read -r rec; do
   RN=$(jq -r '.receipt_number // empty' <<<"$rec")
   [[ -z "$RN" ]] && continue
   
@@ -183,11 +137,11 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     [ .line_items[]? | ($cm[.item_id] // "") ] | unique | map(select(.!="")) | map({name:.})
   ' <<<"$rec")
   
-  EXISTING=$(jq -r --arg rn "$RN" '.[$rn] // empty' <<<"$EXISTING_MAP")
+  EXISTING=$(notion_find_receipt "$RN")
   
-  if [[ -n "$EXISTING" ]]; then
+  if [[ $(jq -r '.id // empty' <<<"$EXISTING") != "" ]]; then
     PAGE_ID=$(jq -r '.id' <<<"$EXISTING")
-    EXISTING_UA=$(jq -r '.updated_at' <<<"$EXISTING")
+    EXISTING_UA=$(jq -r '.properties.updated_at.date.start // empty' <<<"$EXISTING")
     
     if [[ "$UA" == "$EXISTING_UA" ]]; then
       ((SKIPPED++)) || true
@@ -272,38 +226,18 @@ echo "$RAW" | jq -c '.receipts // [] | .[]' | while read -r rec; do
     [ { object:"block", type:"table", table:{ table_width:7, has_column_header:true, has_row_header:false, children: $rows }} ]
   ')
   
+  persist_receipt "$PAGE_ID" "$PROPS" "$CHILDREN"
   if [[ -n "$PAGE_ID" ]]; then
-    curl -s -X PATCH "https://api.notion.com/v1/pages/$PAGE_ID" \
-      -H "Authorization: Bearer $NOTION_API_KEY" \
-      -H "Notion-Version: 2022-06-28" \
-      -H "Content-Type: application/json" \
-      --data "$PROPS" >/dev/null
-    
-    clear_page_children "$PAGE_ID"
-    
-    curl -s -X PATCH "https://api.notion.com/v1/blocks/$PAGE_ID/children" \
-      -H "Authorization: Bearer $NOTION_API_KEY" \
-      -H "Notion-Version: 2022-06-28" \
-      -H "Content-Type: application/json" \
-      --data "{ \"children\": $CHILDREN }" >/dev/null
-    
-    ((UPDATED++)) || true
+    UPDATED=$((UPDATED + 1))
   else
-    FULL=$(jq -n --argjson p "$PROPS" --argjson c "$CHILDREN" '$p + { children: $c }')
-    curl -s -X POST "https://api.notion.com/v1/pages" \
-      -H "Authorization: Bearer $NOTION_API_KEY" \
-      -H "Notion-Version: 2022-06-28" \
-      -H "Content-Type: application/json" \
-      --data "$FULL" >/dev/null
-    
-    ((CREATED++)) || true
+    CREATED=$((CREATED + 1))
   fi
-done
+done <<<"$RECEIPTS"
 
 LATEST_NUMBER=$(jq -r '(.receipts // []) | max_by(.created_at)? | .receipt_number // empty' <<<"$RAW")
 
 if [[ -n "$LATEST_NUMBER" ]]; then
-  echo "$LATEST_NUMBER" > "$LAST_RECEIPT_FILE"
+  write_checkpoint "$LATEST_NUMBER"
 fi
 
 echo "Sync complete: Created $CREATED, Updated $UPDATED, Skipped $SKIPPED"

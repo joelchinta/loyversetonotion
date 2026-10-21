@@ -7,28 +7,36 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: loyverse-notion-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-      
+
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
-      
+
       - name: Download cache from Gist
-        continue-on-error: true
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-            https://api.github.com/gists/${{ secrets.GIST_ID }} | \
-            jq -r '.files."loyverse_cache.json".content // "{}"' > .loyverse_cache.json
-          
-          curl -f -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-            https://api.github.com/gists/${{ secrets.GIST_ID }} | \
-            jq -r '.files."last_receipt.txt".content // "Value"' > .last_receipt.txt
-      
+          curl --fail --silent --show-error --max-time 45 \
+            -H "Authorization: token $GIST_TOKEN" \
+            "https://api.github.com/gists/$GIST_ID" > .gist-download.json
+          jq -er '.files."loyverse_cache.json".content // "{}"' .gist-download.json | jq -ce 'select(type == "object")' > .loyverse_cache.json.tmp
+          jq -er '.files."last_receipt.txt".content // "Value"' .gist-download.json > .last_receipt.txt.tmp
+          mv .loyverse_cache.json.tmp .loyverse_cache.json
+          mv .last_receipt.txt.tmp .last_receipt.txt
+          rm .gist-download.json
+          echo "Using starting receipt: $(cat .last_receipt.txt)"
+
       - name: Run webhook sync script
         env:
           LOYVERSE_API_KEY: ${{ secrets.LOYVERSE_API_KEY }}
@@ -38,15 +46,17 @@ jobs:
         run: |
           chmod +x webhook-sync.sh
           ./webhook-sync.sh
-      
+
       - name: Upload cache to Gist
-        if: always()
+        if: success()
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: |
           CACHE_CONTENT=$(cat .loyverse_cache.json | jq -Rs .)
           RECEIPT_CONTENT=$(cat .last_receipt.txt | jq -Rs .)
-          
-          curl -s -X PATCH \
-            -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+          curl --fail --silent --show-error --max-time 45 -X PATCH \
+            -H "Authorization: token $GIST_TOKEN" \
             -H "Content-Type: application/json" \
-            https://api.github.com/gists/${{ secrets.GIST_ID }} \
+            "https://api.github.com/gists/$GIST_ID" \
             -d "{\"files\":{\"loyverse_cache.json\":{\"content\":$CACHE_CONTENT},\"last_receipt.txt\":{\"content\":$RECEIPT_CONTENT}}}" > /dev/null
